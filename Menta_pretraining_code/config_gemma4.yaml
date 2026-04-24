@@ -1,0 +1,62 @@
+# Gemma 4B Mental Health Multi-Task Fine-tuning Configuration
+# Verify the model ID at huggingface.co/google before first use.
+
+# Model Configuration
+model:
+  name: "google/gemma-4-E4B-it"
+  max_length: 512
+  use_8bit: true
+
+# Training Configuration
+training:
+  batch_size: 4
+  learning_rate: 5e-4
+  num_epochs: 3
+  warmup_steps: 100
+  save_steps: 500
+  eval_steps: 500
+  logging_steps: 100
+  use_weighted_loss: true
+
+# LoRA Configuration
+# Gemma 4B shares the same projection layer names as Qwen3-4B.
+lora:
+  r: 8
+  alpha: 16
+  dropout: 0.1
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+
+# Log-Probability Configuration
+logprob:
+  alpha: 5.0  # sigmoid sharpness
+  beta: 0.3  # CE vs BACC trade-off
+
+# Paths Configuration
+paths:
+  data_dir: "data"
+  cache_dir: "cache"
+  output_dir: "gemma4_outputs"
+  model_output_dir: "gemma4_trained_model"
+
+# Data Configuration
+data:
+  train_split: 0.72
+  eval_split: 0.08
+  test_split: 0.20
+  random_state: 42
+
+# Task Weights
+task_weights:
+  task1_stress: 1.0
+  task2_depression_binary: 1.0
+  task3_depression_severity: 1.2
+  task4_suicide_ideation: 1.2
+  task5_suicide_risk_binary: 1.5
+  task6_suicide_risk_severity: 1.5
+
+# Environment Configuration
+environment:
+  cuda_visible_devices: "0"
+  tokenizers_parallelism: false
+  wandb_mode: "offline"
+  disable_telemetry: true
