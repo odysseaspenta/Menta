@@ -421,6 +421,7 @@ class Qwen3LoRAMultiTaskTrainer:
                 os.environ['WANDB_DISABLED'] = 'true'
             elif cache_type == 'nltk_data':
                 import nltk
+                import nltk.data
                 nltk.data.path.append(cache_dir)
             elif cache_type == 'wandb':
                 os.environ['WANDB_CACHE_DIR'] = cache_dir
