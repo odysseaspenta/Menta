@@ -1,0 +1,3 @@
+[submodule "Menta_deployment/llamacpp-framework"]
+	path = Menta_deployment/llamacpp-framework
+	url = https://github.com/ggerganov/llama.cpp.git
