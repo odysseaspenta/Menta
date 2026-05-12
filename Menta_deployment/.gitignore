@@ -115,6 +115,7 @@ ENV/
 # Development notes and documentation (keep important docs)
 *.md
 !README.md
+!GEMINI.md
 !LICENSE.md
 !CONTRIBUTING.md
 !REQUIREMENTS.md

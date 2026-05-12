@@ -21,10 +21,9 @@ The framework supports 6 mental health classification tasks across 4 datasets:
 - `Menta_lora_multitask_weighted_optimized.py`: Core multi-task training logic.
 - `improved_logprob_implementation.py`: Implementation of log-prob scoring and BACC surrogate loss.
 - `gemma4_lora_trainer.py`: Gemma-specific trainer subclass with tokenizer and layer patching.
-- `Menta_lora_config1_logprob.py`: Entry point for Qwen3 training (Config 1).
 - `Menta_gemma4_lora_config1_logprob.py`: Entry point for Gemma 4B training (Config 1).
+- `merge_lora_gemma4.py`: Script to merge LoRA adapters into the Gemma 4 base model for deployment.
 - `config.yaml` / `config_gemma4.yaml`: Configuration files for training hyperparameters.
-- `dataset/`: Contains CSV files for the 4 target datasets.
 
 ## Building and Running
 
@@ -37,21 +36,30 @@ pip install -r requirements.txt
 mkdir -p data cache/huggingface cache/nltk_data cache/wandb outputs
 ```
 
-### Training Commands
-- **Qwen3 Training (Config 1)**:
+### Training & Merging Commands
+- **Qwen3 Training**:
   ```bash
   python Menta_lora_config1_logprob.py
   ```
-- **Gemma 4B Training (Config 1)**:
+- **Gemma 4B Training**:
   ```bash
   python Menta_gemma4_lora_config1_logprob.py
   ```
-- **Custom Training (using setup.py entry points)**:
+- **Gemma 4B Merging (for Deployment)**:
   ```bash
-  qwen3-train --config config.yaml
+  python merge_lora_gemma4.py --adapter_dir ./gemma4_trained_model --output_dir ./gemma4_merged
   ```
+  *Note: Merging requires ~16GB RAM for float32. Use `torch_dtype=torch.bfloat16` if constrained.*
 
 ### Data Setup
+...
+
+## LoRA Merging (Gemma 4)
+When deploying to Android, the LoRA adapter must be merged into the base model before GGUF conversion. 
+- **Tool**: `merge_lora_gemma4.py`
+- **Important**: The Gemma 4 trainer uses `Gemma4ClippableLinear` (patching `.linear` children). The merging script handles this by resolving the full PEFT parameter paths correctly.
+- **Verification**: Ensure the merged `state_dict` contains proper weight keys and generates valid single-digit outputs before conversion.
+
 Ensure the following files are in the `dataset/` or `data/` directory (depending on config):
 - `dreaddit_StressAnalysis - Sheet1.csv`
 - `Reddit_depression_dataset.csv`

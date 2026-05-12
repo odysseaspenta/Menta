@@ -119,10 +119,9 @@ llama.cpp's `convert_hf_to_gguf.py` (from the **updated** framework) auto-detect
 ```bash
 # Use the llama.cpp conversion script from the framework submodule
 python Menta_deployment/llamacpp-framework/convert_hf_to_gguf.py \
-    ./Menta_pretraining_code/gemma4_merged \
+    /sysnet/models/gemma4_merged_model_config1 \
     --outfile gemma4-menta-f16.gguf \
-    --outtype f16 \
-    --vocab-type bpe
+    --outtype f16
 ```
 
 **Multimodal handling:** The upstream `Gemma4Model` converter handles text-only conversion and a separate `Gemma4VisionAudioModel` handles the vision path. Running `convert_hf_to_gguf.py` on the merged directory should automatically select the text-only path. If the converter still includes vision tensors or if you want a smaller GGUF, strip them before saving the merged model:
@@ -136,7 +135,7 @@ clean_state = {k: v for k, v in merged.state_dict().items()
 
 **Verify the GGUF:**
 ```bash
-python Menta_deployment/llamacpp-framework/gguf-py/scripts/gguf-dump.py gemma4-menta-f16.gguf | grep "general.architecture"
+python Menta_deployment/llamacpp-framework/gguf-py/gguf/scripts/gguf-dump.py gemma4-menta-f16.gguf | grep "general.architecture"
 # Should print: general.architecture = gemma4   (NOT gemma3n)
 ```
 
@@ -300,6 +299,101 @@ Read CSVs from `context.assets.open(path)` instead of `Bundle.main`. The label r
 6. Compare accuracy on same 10 samples across iOS (Qwen3 fine-tuned) and Android (Gemma4 fine-tuned) to establish baseline.
 
 ---
+
+## Examples of manual tests to evaluate the quantized, GGUF version of the fine-tuned Gemma4 model
+  1. Stress Detection (Binary)
+   * Task: Identify if a post indicates high stress.
+   * Labels: 1 (Stressed), 0 (Not Stressed).
+
+   /sysnet/projects/llama.cpp/build/bin/llama-cli \
+       -m gemma4-menta-Q4_K_M.gguf \
+       -p "<|turn>system\nYou are an expert mental health analyst. Analyze if the following post shows signs of high stress, such as feeling overwhelmed, anxious, or unable to handle pressure.<turn|>\n<|turn>user\nPost: 'I have so many deadlines at work and I haven't slept in three days. I feel like I am falling apart and can't take it anymore.'\n\nRespond with only 0 or 1.<turn|>\n<|turn>model" \
+       -n 4 --no-display-prompt
+
+  2. Depression Detection (Binary)
+   * Task: Detect signs of depression (Persistent sadness, hopelessness).
+   * Labels: 1 (Depressed), 0 (Not Depressed).
+
+   /sysnet/projects/llama.cpp/build/bin/llama-cli \
+   	-m gemma4-menta-Q4_K_M.gguf \
+   	-p "<|turn>system\nYou are a clinical psychologist. Does this post indicate depression symptoms like persistent hopelessness or loss of interest?<turn|>\n<|turn>user\nPost: 'Nothing brings me joy anymore. I just want to stay in bed all day and I feel completely worthless.'\n\nRespond with only 0 or 1.<turn|>\n<|turn>model\n" \
+   4     -n 4 --no-display-prompt
+
+  3. Depression Severity (4-Level)
+   * Task: Rate the severity of depression.
+   * Labels: 0 (Minimal), 1 (Mild), 2 (Moderate), 3 (Severe).
+
+   /sysnet/projects/llama.cpp/build/bin/llama-cli \
+        -m gemma4-menta-Q4_K_M.gguf \
+        -p "<|turn>system\nYou are a psychiatrist. Rate the depression severity level of this post from 0 to 3. 0=Minimal, 1=Mild 2=Moderate, 3=Severe.<turn|>\n<|turn>user\nPost: 'I am struggling to concentrate at work and I feel sad most days, but I am still  managing to get things done.'\n\nRespond with only the digit 0, 1, 2, or 3.<turn|>\n<|turn>model\n" \
+        -n 4 --no-display-prompt
+
+  4. Suicide Ideation (Binary)
+   * Task: Detect suicidal thoughts or death wishes.
+   * Labels: 1 (Ideation Present), 0 (No Ideation).
+
+   /sysnet/projects/llama.cpp/build/bin/llama-cli \
+        -m gemma4-menta-Q4_K_M.gguf \
+        -p "<|turn>system\nYou are a crisis intervention specialist. Does this post contain suicidal ideation or expressions of wanting to die?<turn|>\n<|turn>user\nPost: 'I sometimes wish I could just disappear and never wake up. The world would be better without me.'\n\nRespond with only 0 or 1.<turn|>\n<|turn>model\n" \
+       -n 4 --no-display-prompt
+
+  5. Suicide Risk (Binary)
+   * Task: General risk assessment (includes indicators like isolation or trauma).
+   * Labels: 1 (At Risk), 0 (No Risk).
+
+   /sysnet/projects/llama.cpp/build/bin/llama-cli \
+       -m gemma4-menta-Q4_K_M.gguf \
+       -p "<|turn>system\nYou are a suicide prevention specialist. Evaluate if this user shows any indicator of suicide risk.<turn|>\n<|turn>user\nPost: 'I have lost my job and my family won't talk to me. I feel completely alone and there is no way out.'\n\nRespond with only 0 or 1.<turn|>\n<|turn>model\n" \
+        -n 4 --no-display-prompt
+
+  6. Suicide Risk Severity (5-Level)
+   * Task: Categorize the specific stage of suicide risk.
+   * Labels: 1 (Supportive/No Risk), 2 (Indicator), 3 (Ideation), 4 (Behavior/Planning), 5 (Attempt).
+
+   /sysnet/projects/llama.cpp/build/bin/llama-cli \
+        -m gemma4-menta-Q4_K_M.gguf \
+        -p "<|turn>system\nYou are a senior clinical psychologist. Classify the suicide risk level from 1 to 5: 1=Supportive, 2=Indicator, 3=Ideation, 4=Behavior, 5=Attempt.<turn|>\n<|turn>user\nPost: 'I have the pills ready on my nightstand. I'm going to end it tonight.'\n\nRespond with only the digit 1, 2, 3, 4, or 5.<turn|>\n<|turn>model\n" \
+        -n 4 --no-display-prompt
+
+1. Technical/Engineering Context (The word "Stress")
+  This tests if the model can distinguish between "mental stress" and "mechanical stress."
+   * Expected Label: 0
+
+<|turn>system\nYou are a mental health analyst. Determine if this post indicates a person experiencing high mental stress. Respond with 1 for stressed, 0 for not stressed.<turn|>\n<|turn>user\nPost: 'We are currently running a stress test on the structural beams of the bridge to ensure they can handle the weight of the new traffic. It is a standard safety procedure.'\n\nRespond with only 0 or 1.<turn|>\n<|turn>model\n
+
+  2. "Anxious" as Eagerness/Excitement
+  The word "anxious" is often used colloquially to mean "excited" or "eager."
+   * Expected Label: 0
+
+   <|turn>system\nYou are an expert mental health analyst. Determine if this post indicates a mental health condition or high stress. Respond with 1 for stressed/anxious, 0 for not stressed.<turn|>\n<|turn>user\nPost: 'I am so anxious to see my family tomorrow! I haven't seen them in three years and I'm counting down the minutes until I get to the airport.'\n\nRespond with only 0 or 1.<turn|>\n<|turn>model
+
+
+  3. Managed Daily Challenges (The word "Overwhelmed")
+  The training data for Menta emphasizes that "problem-solving" or "managed" tones should be 0.
+   * Expected Label: 0
+
+   <|turn>system\nYou are a clinical psychologist. Does this post show signs of clinical stress or an inability to cope? Respond 1
+      for stressed, 0 for not stressed.<turn|>\n<|turn>user\nPost: 'The grocery store was a bit overwhelming because it was so
+      crowded, but I just took a deep breath, finished my shopping, and now I'm home having a relaxing evening.'\n\nRespond with only
+      0 or 1.<turn|>\n<|turn>model
+
+
+  4. Software/Professional Context ("Panic")
+  Using the word "panic" in a non-clinical, technical sense.
+   * Expected Label: 0
+
+   1 /sysnet/projects/llama.cpp/build/bin/llama-cli \
+   2     -m gemma4-menta-Q4_K_M.gguf \
+   3     -p "<|turn>system\nYou are an expert analyst. Does this post indicate a mental health crisis? Respond 1 for crisis/stress, 0
+     for no crisis.<turn|>\n<|turn>user\nPost: 'The kernel had a panic after the latest update, so I had to roll back the drivers.
+     Everything is back up and running smoothly now.'\n\nRespond with only 0 or 1.<turn|>\n<|turn>model\n" \
+   4     -n 4 --no-display-prompt
+
+  Important Usage Tips:
+   1. Numeric Consistency: The model was fine-tuned specifically to output single digits. Providing context in the system prompt about
+      what each number means (as shown above) helps the model stay "locked" to the correct label space.
+   2. Turn Tokens: Ensure you include the trailing <|turn>model\n to trigger the model's generation.
+   3. No Display: Keep -n 4 --no-display-prompt to quickly see the numeric output without the full prompt text.
 
 ## Critical Files to Modify / Create
 
