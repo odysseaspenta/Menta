@@ -13,6 +13,12 @@ Model ID: google/gemma-4-E4B-it
 
 import sys
 import os
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from Menta_lora_multitask_weighted_optimized import Qwen3LoRAMultiTaskTrainer
@@ -30,28 +36,41 @@ class Gemma4LoRAMultiTaskTrainer(Qwen3LoRAMultiTaskTrainer):
         self.tokenizer.padding_side = "right"
 
     def _setup_lora(self):
-        # With 8-bit quantisation, frozen weights produce outputs with no grad_fn.
-        # prepare_model_for_kbit_training hooks the input embeddings so downstream
-        # tensors carry requires_grad=True, restoring the gradient graph to the LoRA
-        # matrices. It also casts layernorms to fp32 for numerical stability.
         if self.config.use_8bit:
             from peft import prepare_model_for_kbit_training
             self.model = prepare_model_for_kbit_training(
-                self.model, use_gradient_checkpointing=True
+                self.model, use_gradient_checkpointing=False
             )
+            self.model.config.use_cache = False
+            self.config.gradient_checkpointing = False
 
-        # Gemma 4 wraps every projection layer in Gemma4ClippableLinear(...(linear): ...).
-        # PEFT only handles standard module types and raises ValueError on the wrapper.
-        # We redirect each target name to its inner .linear child, which is a supported
-        # Linear8bitLt (or torch.nn.Linear when not quantised).
+        # Identify all linear modules that are NOT the wrapper
+        logger.info("🔍 Surgical targeting of Linear layers...")
+        linear_layers = []
+        for name, module in self.model.named_modules():
+            m_type = str(type(module))
+            if ("Linear" in m_type or "Linear8bitLt" in m_type) and "Gemma4ClippableLinear" not in m_type:
+                # Check if it matches our target projections
+                if any(name.endswith(f".{t}") or name.endswith(f".{t}.linear") for t in ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]):
+                    linear_layers.append(name)
+        
+        if not linear_layers:
+            raise RuntimeError("Could not find any supported Linear layers to target with LoRA!")
+
+        logger.info(f"🎯 Found {len(linear_layers)} supported Linear layers.")
+        
         patched = dict(self.lora_config)
-        patched["target_modules"] = [
-            f"{m}.linear" for m in self.lora_config["target_modules"]
-        ]
+        # Using the explicit list of full module names is the safest way to avoid partial matches
+        patched["target_modules"] = linear_layers
+        
         original = self.lora_config
         self.lora_config = patched
+        
         try:
             super()._setup_lora()
+            trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+            all_params = sum(p.numel() for p in self.model.parameters())
+            logger.info(f"📊 Trainable parameters: {trainable_params} ({100 * trainable_params / all_params:.4f}%)")
         finally:
             self.lora_config = original
 

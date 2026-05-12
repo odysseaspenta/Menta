@@ -5,10 +5,13 @@ Includes standard Log-Prob scoring and BACC surrogate loss
 """
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from typing import List, Dict, Tuple, Optional
 import logging
+from tqdm.auto import tqdm
+from transformers import Trainer
 
 logger = logging.getLogger(__name__)
 
@@ -31,175 +34,65 @@ class ImprovedLogProbEvaluator:
         self.beta = beta    # CE vs BACC trade-off
         
     @torch.no_grad()
-    def predict_logits(self, prompts: List[str], label_tokens: Tuple[str, ...] = ("0", "1"), 
-                      max_len: int = 1024) -> List[int]:
+    def predict_logits(self, prompts: List[str], label_tokens: Tuple[str, ...] = ("0", "1"),
+                      max_len: int = 1024, desc: str = "Scoring") -> List[int]:
         """
         Standard Log-Prob scoring method
         Calculate log p(0|prompt) vs log p(1|prompt) and choose the higher one
-        
-        Args:
-            prompts: Input prompt list
-            label_tokens: Candidate label tokens (e.g., ("0", "1") or ("0", "1", "2", "3"))
-            max_len: Maximum sequence length
-            
-        Returns:
-            Predicted label list
         """
-        # Ensure single token labels, otherwise sum over multiple tokens
         label_ids = []
         for token in label_tokens:
             ids = self.tokenizer.encode(token, add_special_tokens=False)
             if len(ids) == 1:
                 label_ids.append(ids[0])
             else:
-                # Multi-token case: use first token or special handling
                 label_ids.append(ids[0])
                 logger.warning(f"Multi-token label '{token}' detected, using first token")
-        
+
         preds = []
-        for prompt in prompts:
-            # Encode prompt
+        for prompt in tqdm(prompts, desc=desc, unit="sample"):
             inp = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=max_len)
             inp = {k: v.to(self.model.device) for k, v in inp.items()}
-            
-            # Forward pass
             out = self.model(**inp, use_cache=False)
-            
-            # Get logits of the last token
             logits = out.logits[:, -1, :]  # [1, vocab_size]
-            
-            # Calculate log-probability for each label
+
             log_probs = []
             for label_id in label_ids:
                 lp = torch.log_softmax(logits, dim=-1)[0, label_id].item()
                 log_probs.append(lp)
-            
-            # Choose the label with highest log-prob
+
             pred = np.argmax(log_probs)
             preds.append(pred)
-        
         return preds
-    
-    def compute_bacc_surrogate_loss(self, logits: torch.Tensor, true_labels: torch.Tensor, 
-                                  task_classes: int, gamma_c: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
-        Compute BACC surrogate loss
-        
-        Args:
-            logits: Model output logits [batch_size, num_classes]
-            true_labels: True labels [batch_size]
-            task_classes: Number of task classes
-            gamma_c: Class weights, if None use uniform weights
-            
-        Returns:
-            BACC surrogate loss
-        """
-        batch_size = logits.size(0)
-        
-        # If no class weights provided, use uniform weights
-        if gamma_c is None:
-            gamma_c = torch.ones(task_classes, device=logits.device)
-        
-        # Step 1: Calculate margin for each class
-        # m_{i,c} = z_{i,c} - log(sum_{k!=c} e^(z_{i,k}))
-        margins = torch.zeros(batch_size, task_classes, device=logits.device)
-        
-        for c in range(task_classes):
-            # For class c, calculate margin
-            z_c = logits[:, c]  # [batch_size]
-            
-            # Calculate log-sum-exp of other classes
-            other_logits = torch.cat([logits[:, :c], logits[:, c+1:]], dim=1)
-            log_sum_exp_others = torch.logsumexp(other_logits, dim=1)
-            
-            margins[:, c] = z_c - log_sum_exp_others
-        
-        # Step 2: Calculate soft "is correct" score
-        # s_{i,c} = sigma(alpha * m_{i,c})
-        sigmoid_scores = torch.sigmoid(self.alpha * margins)  # [batch_size, num_classes]
-        
-        # Step 3: Calculate TPR for each class
-        # TPR_c = (1 / |I_c|) * sum_{i in I_c} s_{i,c}
-        tpr_c = torch.zeros(task_classes, device=logits.device)
-        
-        for c in range(task_classes):
-            # Find sample indices with true label c
-            mask_c = (true_labels == c)
-            if mask_c.sum() > 0:
-                tpr_c[c] = sigmoid_scores[mask_c, c].mean()
-            else:
-                tpr_c[c] = 0.0  # If no samples belong to class c
-        
-        # Step 4: Calculate BACC surrogate loss
-        # LBACC = 1 - (1 / sum_c gamma_c) * sum_c gamma_c * TPR_c
-        gamma_sum = gamma_c.sum()
-        if gamma_sum > 0:
-            weighted_tpr = (gamma_c * tpr_c).sum()
-            bacc_loss = 1.0 - weighted_tpr / gamma_sum
-        else:
-            bacc_loss = torch.tensor(1.0, device=logits.device)
-        
-        return bacc_loss
-    
-    def compute_combined_loss(self, logits: torch.Tensor, true_labels: torch.Tensor, 
-                            task_classes: int, gamma_c: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
-        Compute combined loss: L = LCE + β * LBACC
-        
-        Args:
-            logits: Model output logits
-            true_labels: True labels
-            task_classes: Number of task classes
-            gamma_c: Class weights
-            
-        Returns:
-            Combined loss
-        """
-        # Step 1: Cross-Entropy Loss
-        ce_loss = F.cross_entropy(logits, true_labels)
-        
-        # Step 2: BACC Surrogate Loss
-        bacc_loss = self.compute_bacc_surrogate_loss(logits, true_labels, task_classes, gamma_c)
-        
-        # Step 3: Combined loss
-        combined_loss = ce_loss + self.beta * bacc_loss
-        
-        return combined_loss
-    
+
     def evaluate_task_with_improved_logprob(self, task_config, test_data, 
                                           label_tokens: Optional[List[str]] = None) -> Dict[str, float]:
         """
         Evaluate task using improved Log-Prob method
-        
-        Args:
-            task_config: Task configuration
-            test_data: Test data
-            label_tokens: Label tokens, if None use task_config.class_names
-            
-        Returns:
-            Evaluation metrics dictionary
         """
         if label_tokens is None:
             label_tokens = [str(x) for x in task_config.class_names]
         
-        logger.info(f"Evaluating task using improved Log-Prob method: {task_config.name}")
-        logger.info(f"Label tokens: {label_tokens}")
-        
+        n_samples = len(test_data)
+        logger.info(f"Evaluating '{task_config.name}' — {n_samples} samples, labels: {label_tokens}")
+
         # Prepare data
         prompts = []
         true_labels = []
-        
+
         for _, row in test_data.iterrows():
             text = str(row[task_config.text_column])
             label = str(row[task_config.label_column])
-            
+
             # Format prompt
             prompt = task_config.prompt_template.format(text=text, label="")
             prompts.append(prompt)
             true_labels.append(label)
-        
+
         # Use improved Log-Prob prediction
-        predictions = self.predict_logits(prompts, tuple(label_tokens))
+        predictions = self.predict_logits(
+            prompts, tuple(label_tokens), desc=task_config.name
+        )
         
         # Convert to numeric labels
         label_map = {token: i for i, token in enumerate(label_tokens)}
@@ -221,85 +114,200 @@ class ImprovedLogProbEvaluator:
             logger.info(f"  {metric}: {value:.4f}")
         
         return metrics
-
-def create_improved_logprob_trainer(base_trainer_class):
-    """Create improved Log-Prob trainer class"""
     
-    class ImprovedLogProbTrainer(base_trainer_class):
-        """Improved Log-Prob trainer"""
+    def compute_bacc_surrogate_loss(self, logits: torch.Tensor, true_labels: torch.Tensor, 
+                                  task_classes: int, gamma_c: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Compute BACC surrogate loss
+        Args:
+            logits: classification logits [batch_size, num_classes]
+            true_labels: true labels [batch_size]
+        """
+        batch_size = logits.size(0)
+        if gamma_c is None:
+            gamma_c = torch.ones(task_classes, device=logits.device)
         
+        # Step 1: Calculate margin for each class
+        margins = torch.zeros(batch_size, task_classes, device=logits.device)
+        for c in range(task_classes):
+            z_c = logits[:, c]
+            other_logits = torch.cat([logits[:, :c], logits[:, c+1:]], dim=1)
+            log_sum_exp_others = torch.logsumexp(other_logits, dim=1)
+            margins[:, c] = z_c - log_sum_exp_others
+        
+        # Step 2: Calculate soft "is correct" score
+        sigmoid_scores = torch.sigmoid(self.alpha * margins)
+        
+        # Step 3: Calculate TPR for each class
+        tpr_c = torch.zeros(task_classes, device=logits.device)
+        for c in range(task_classes):
+            mask_c = (true_labels == c)
+            if mask_c.sum() > 0:
+                tpr_c[c] = sigmoid_scores[mask_c, c].mean()
+            else:
+                tpr_c[c] = 0.0
+        
+        # Step 4: Calculate BACC surrogate loss
+        gamma_sum = gamma_c.sum()
+        if gamma_sum > 0:
+            weighted_tpr = (gamma_c * tpr_c).sum()
+            bacc_loss = 1.0 - weighted_tpr / gamma_sum
+        else:
+            bacc_loss = torch.tensor(1.0, device=logits.device)
+        return bacc_loss
+
+    def compute_combined_loss(self, logits: torch.Tensor, true_labels: torch.Tensor, 
+                            task_classes: int, label_ids: List[int]) -> torch.Tensor:
+        """
+        Args:
+            logits: classification logits [batch_size, vocab_size]
+            true_labels: true labels [batch_size] (token IDs)
+            task_classes: number of task classes (e.g. 2 for binary)
+            label_ids: the actual token IDs for the classes (e.g. IDs of "0" and "1")
+        """
+        # Map true token IDs to class indices (0, 1, ...)
+        # This is tricky because true_labels are token IDs.
+        # Let's create a mapping
+        token_to_idx = {token_id: i for i, token_id in enumerate(label_ids)}
+        class_labels = torch.tensor([token_to_idx.get(tl.item(), 0) for tl in true_labels], device=logits.device)
+        
+        # Filter logits to only include the candidate label tokens
+        reduced_logits = logits[:, label_ids] # [batch_size, num_classes]
+        
+        ce_loss = F.cross_entropy(reduced_logits, class_labels)
+        bacc_loss = self.compute_bacc_surrogate_loss(reduced_logits, class_labels, len(label_ids))
+        return ce_loss + self.beta * bacc_loss
+
+class CustomLogProbTrainer(Trainer):
+    def __init__(self, *args, **kwargs):
+        # Pop custom arguments before calling super().__init__
+        self.alpha = kwargs.pop('alpha', 5.0)
+        self.beta = kwargs.pop('beta', 0.3)
+        self.label_tokens = kwargs.pop('label_tokens', ("0", "1", "2", "3", "4", "5"))
+        self.label_ids = None
+        
+        # Pop tokenizer to avoid "unexpected keyword argument" in older or custom Trainer versions
+        tokenizer = kwargs.pop('tokenizer', None)
+        
+        # Now kwargs only contains arguments valid for the base Trainer
+        super().__init__(*args, **kwargs)
+        
+        # Manually set tokenizer if it was provided
+        if tokenizer is not None and not hasattr(self, 'tokenizer'):
+            self.tokenizer = tokenizer
+        elif tokenizer is not None:
+            self.tokenizer = tokenizer
+        
+    def _get_label_ids(self):
+        if self.label_ids is None:
+            self.label_ids = []
+            for token in self.label_tokens:
+                ids = self.tokenizer.encode(token, add_special_tokens=False)
+                self.label_ids.append(ids[0])
+        return self.label_ids
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None, **kwargs):
+        labels = inputs.get("labels")
+        attention_mask = inputs.get("attention_mask")
+        outputs = model(**inputs)
+        logits = outputs.get("logits")
+        
+        # Standard Causal LM loss for the whole sequence
+        # This ensures the model learns the overall structure
+        if labels is not None:
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            loss_fct = nn.CrossEntropyLoss()
+            base_loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            
+            # Additional BACC surrogate loss for the label token
+            # Find the position of the label token (last non-pad token)
+            batch_size = logits.size(0)
+            label_pos = attention_mask.sum(dim=1) - 1 # [batch_size]
+            
+            # The logit that predicts the label is at label_pos - 1
+            # (Since shift_logits[t] corresponds to shift_labels[t])
+            # Wait, easier to use non-shifted logits: logits[i, label_pos[i]-1] predicts labels[i, label_pos[i]]
+            
+            target_logits = []
+            target_labels = []
+            
+            label_ids_list = self._get_label_ids()
+            
+            for i in range(batch_size):
+                pos = label_pos[i].item()
+                if pos > 0:
+                    # Logits at position pos-1 predict token at position pos
+                    l_idx = pos - 1
+                    target_logits.append(logits[i, l_idx].unsqueeze(0))
+                    target_labels.append(labels[i, pos].unsqueeze(0))
+            
+            if len(target_logits) > 0:
+                target_logits = torch.cat(target_logits, dim=0) # [B, V]
+                target_labels = torch.cat(target_labels, dim=0) # [B]
+                
+                # Check if these labels are in our expected label_tokens
+                # Some tasks might have different number of classes
+                # For simplicity, we filter only those present in label_ids_list
+                mask = torch.tensor([tl.item() in label_ids_list for tl in target_labels], device=logits.device)
+                if mask.any():
+                    filtered_logits = target_logits[mask]
+                    filtered_labels = target_labels[mask]
+                    
+                    # We need to know how many classes for THIS sample/task
+                    # But multi-task means classes vary.
+                    # Simplified: Use all candidate labels ("0" to "5")
+                    token_to_idx = {token_id: i for i, token_id in enumerate(label_ids_list)}
+                    class_labels = torch.tensor([token_to_idx[tl.item()] for tl in filtered_labels], device=logits.device)
+                    reduced_logits = filtered_logits[:, label_ids_list]
+                    
+                    evaluator = ImprovedLogProbEvaluator(None, None, self.alpha, self.beta)
+                    bacc_loss = evaluator.compute_bacc_surrogate_loss(reduced_logits, class_labels, len(label_ids_list))
+                    
+                    loss = base_loss + self.beta * bacc_loss
+                else:
+                    loss = base_loss
+            else:
+                loss = base_loss
+        else:
+            loss = outputs.get("loss")
+            
+        return (loss, outputs) if return_outputs else loss
+
+def create_improved_logprob_trainer(base_orchestrator_class):
+    """Create improved Log-Prob orchestrator class"""
+    
+    class ImprovedLogProbOrchestrator(base_orchestrator_class):
         def __init__(self, *args, alpha: float = 5.0, beta: float = 0.3, **kwargs):
             super().__init__(*args, **kwargs)
             self.alpha = alpha
             self.beta = beta
-            # Initialize logprob evaluator after model is set up
             self.logprob_evaluator = None
             
         def _setup_logprob_evaluator(self):
-            """Setup Log-Prob evaluator after model is initialized"""
             if self.logprob_evaluator is None:
-                # Check if we have access to model and tokenizer through different paths
-                model_access = None
-                tokenizer_access = None
-                
-                # Try direct access
                 if hasattr(self, 'model') and hasattr(self, 'tokenizer'):
-                    model_access = self.model
-                    tokenizer_access = self.tokenizer
-                # Try through internal trainer
-                elif hasattr(self, '_trainer') and hasattr(self._trainer, 'model') and hasattr(self._trainer, 'tokenizer'):
-                    model_access = self._trainer.model
-                    tokenizer_access = self._trainer.tokenizer
-                
-                if model_access is not None and tokenizer_access is not None:
                     self.logprob_evaluator = ImprovedLogProbEvaluator(
-                        model_access, tokenizer_access, self.alpha, self.beta
+                        self.model, self.tokenizer, self.alpha, self.beta
                     )
-                else:
-                    logger.warning("Cannot setup LogProb evaluator: model or tokenizer not accessible")
         
-        def compute_loss(self, model, inputs, return_outputs=False):
-            """Override loss computation, using BACC surrogate loss"""
-            # Setup evaluator if not already done
-            self._setup_logprob_evaluator()
-            
-            labels = inputs.get("labels")
-            
-            # Forward pass
-            outputs = model(**inputs)
-            logits = outputs.get("logits")
-            
-            if labels is not None and self.logprob_evaluator is not None:
-                # Calculate combined loss
-                loss = self.logprob_evaluator.compute_combined_loss(
-                    logits, labels, 
-                    task_classes=logits.size(-1)
-                )
-            else:
-                loss = outputs.get("loss", torch.tensor(0.0))
-            
-            return (loss, outputs) if return_outputs else loss
+        def get_trainer(self, training_args, train_dataset, eval_dataset, data_collator, class_weights):
+            # Use CustomLogProbTrainer instead of standard Trainer
+            return CustomLogProbTrainer(
+                model=self.model,
+                args=training_args,
+                train_dataset=train_dataset,
+                eval_dataset=eval_dataset,
+                data_collator=data_collator,
+                alpha=self.alpha,
+                beta=self.beta,
+                tokenizer=self.tokenizer
+            )
         
         def evaluate_task_with_logprob(self, task_config, test_data):
-            """Evaluate task using improved Log-Prob method"""
-            # Setup evaluator if not already done
             self._setup_logprob_evaluator()
-            
-            if self.logprob_evaluator is None:
-                raise RuntimeError("LogProb evaluator not initialized. Make sure model and tokenizer are set up.")
-                
             return self.logprob_evaluator.evaluate_task_with_improved_logprob(
                 task_config, test_data
             )
-    
-    return ImprovedLogProbTrainer
-
-# Usage example
-if __name__ == "__main__":
-    # Example: How to use improved Log-Prob evaluator
-    print("Improved Log-Prob implementation is ready")
-    print("Main features:")
-    print("1. Standard Log-Prob scoring: log p(0|prompt) vs log p(1|prompt)")
-    print("2. BACC surrogate loss: Balanced accuracy surrogate loss")
-    print("3. Combined loss: L = LCE + β * LBACC")
-    print("4. Tunable parameters: α (sharpness), β (trade-off)")
+            
+    return ImprovedLogProbOrchestrator

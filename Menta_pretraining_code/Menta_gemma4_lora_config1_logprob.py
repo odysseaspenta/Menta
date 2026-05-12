@@ -43,6 +43,7 @@ def main():
         model_name=GEMMA4_MODEL_ID,
         use_weighted_loss=True,
         output_dir="./gemma4_trained_model_config1",
+        learning_rate=2e-4,
         lora_r=lora_config["r"],
         lora_alpha=lora_config["alpha"],
         lora_dropout=lora_config["dropout"],
@@ -59,6 +60,9 @@ def main():
         beta=0.3    # CE vs BACC trade-off
     )
     trainer.train()
+
+    # Save model before evaluation
+    trainer.save_model()
 
     gc.collect()
     torch.cuda.empty_cache()

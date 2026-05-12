@@ -58,6 +58,7 @@ class MultiTaskConfig:
                  logging_steps: int = 100,
                  output_dir: str = "./qwen3_lora_multitask_output",
                  use_8bit: bool = True,
+                 gradient_checkpointing: bool = False,
                  lora_r: int = 8,
                  lora_alpha: int = 16,
                  lora_dropout: float = 0.1,
@@ -75,6 +76,7 @@ class MultiTaskConfig:
         self.logging_steps = logging_steps
         self.output_dir = output_dir
         self.use_8bit = use_8bit
+        self.gradient_checkpointing = gradient_checkpointing
         self.lora_r = lora_r
         self.lora_alpha = lora_alpha
         self.lora_dropout = lora_dropout
@@ -460,7 +462,9 @@ class Qwen3LoRAMultiTaskTrainer:
             quantization_config=quantization_config,
             device_map="auto",
             cache_dir=cache_dir,
-            local_files_only=False
+            local_files_only=False,
+            trust_remote_code=True,
+            torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32
         )
         
         logger.info("✅ Model and tokenizer loaded successfully")
@@ -492,6 +496,26 @@ class Qwen3LoRAMultiTaskTrainer:
         # Return None to let WeightedTrainer use standard loss
         return None
     
+    def get_trainer(self, training_args, train_dataset, eval_dataset, data_collator, class_weights):
+        """Get the trainer instance. Can be overridden by subclasses."""
+        if self.config.use_weighted_loss and class_weights is not None:
+            return WeightedTrainer(
+                model=self.model,
+                args=training_args,
+                train_dataset=train_dataset,
+                eval_dataset=eval_dataset,
+                data_collator=data_collator,
+                class_weights=class_weights
+            )
+        else:
+            return Trainer(
+                model=self.model,
+                args=training_args,
+                train_dataset=train_dataset,
+                eval_dataset=eval_dataset,
+                data_collator=data_collator
+            )
+
     def train(self):
         """Train model"""
         logger.info("🎯 Starting training")
@@ -529,7 +553,7 @@ class Qwen3LoRAMultiTaskTrainer:
             metric_for_best_model="eval_loss",
             greater_is_better=False,
             report_to=[],  # Disable wandb
-            gradient_checkpointing=False,  # Disable to improve speed
+            gradient_checkpointing=self.config.gradient_checkpointing,
             optim="adamw_torch",
             dataloader_num_workers=0,
             remove_unused_columns=False,
@@ -544,37 +568,28 @@ class Qwen3LoRAMultiTaskTrainer:
         )
         
         # Create trainer
-        if self.config.use_weighted_loss and class_weights is not None:
-            trainer = WeightedTrainer(
-                model=self.model,
-                args=training_args,
-                train_dataset=train_dataset,
-                eval_dataset=eval_dataset,
-                data_collator=data_collator,
-                class_weights=class_weights
-            )
-        else:
-            trainer = Trainer(
-                model=self.model,
-                args=training_args,
-                train_dataset=train_dataset,
-                eval_dataset=eval_dataset,
-                data_collator=data_collator
-            )
+        trainer = self.get_trainer(
+            training_args, train_dataset, eval_dataset, data_collator, class_weights
+        )
         
         # Start training
         trainer.train()
-        
-        # Save model
-        trainer.save_model()
-        self.tokenizer.save_pretrained(self.config.output_dir)
-        
+
         # Store the trainer for potential later use
         self._trainer = trainer
-        
+
         logger.info("✅ Training completed")
-        
+
         return self
+
+    def save_model(self, output_dir: str = None):
+        """Save the trained LoRA model and tokenizer to disk"""
+        save_dir = output_dir or self.config.output_dir
+        os.makedirs(save_dir, exist_ok=True)
+        logger.info(f"💾 Saving model to: {save_dir}")
+        self._trainer.save_model(save_dir)
+        self.tokenizer.save_pretrained(save_dir)
+        logger.info(f"✅ Model saved to: {save_dir}")
 
 
 def create_lora_configs():
@@ -624,7 +639,10 @@ def main():
     # Create trainer and start training
     trainer = Qwen3LoRAMultiTaskTrainer(config, tasks, lora_config)
     trainer.train()
-    
+
+    # Save model before evaluation
+    trainer.save_model()
+
     logger.info("🎉 All tasks completed!")
 
 if __name__ == "__main__":

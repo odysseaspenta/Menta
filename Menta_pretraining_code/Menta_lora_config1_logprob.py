@@ -67,13 +67,16 @@ def main():
         beta=0.3    # CE vs BACC trade-off
     )
     trainer.train()
-    
+
+    # Save model before evaluation
+    trainer.save_model()
+
     # Clear GPU memory after training
     import gc
     import torch
     gc.collect()
     torch.cuda.empty_cache()
-    
+
     # Use improved Log-Prob method to evaluate all tasks
     logger.info("🔍 Starting improved Log-Prob evaluation...")
     task_results = {}
